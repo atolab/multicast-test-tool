@@ -81,8 +81,8 @@ class socketWaitset:
 @dataclasses.dataclass
 class udpMetricsReportItem:
     percentile: float = 0.0
-    sampleCount: int = 0
-    totalSampleCount: int = 0
+    valueCount: int = 0
+    totalValueCount: int = 0
     minimum: float = 0
     average: float = 0
     maximum: float = 0
@@ -90,40 +90,41 @@ class udpMetricsReportItem:
 
     def __str__(self):
         return (
-            f"{self.percentile:5.1f} % : cnt= {self.sampleCount}/{self.totalSampleCount}, min= {self.minimum:.0f},"
+            f"{self.percentile:5.1f} % : cnt= {self.valueCount}/{self.totalValueCount}, min= {self.minimum:.0f},"
             f" avg= {self.average:.0f}, max= {self.maximum:.0f}, dev= {self.deviation:.2f}"
         )
 
 
 @dataclasses.dataclass
 class udpMetrics:
-    max_number_of_samples: int
-    samples: list = dataclasses.field(default_factory=list)
+    max_number_of_values: int
+    values: list = dataclasses.field(default_factory=list)
 
-    def append(self, sample):
-        if len(self.samples) < self.max_number_of_samples:
-            self.samples.append(sample)
+    def append(self, value):
+        if len(self.values) < self.max_number_of_values:
+            self.values.append(value)
 
     def report(self, percentile):
-        # ensure at least one sample
-        if not self.samples:
+        # ensure at least one value
+        count = int(len(self.values) * percentile / 100.0)
+
+        if count < 1:
             return udpMetricsReportItem()
 
-        count = 1 + math.floor(len(self.samples) * percentile / 100.0 - 0.999)
-        samples = self.samples[:count]
+        values = self.values[:count]
 
         return udpMetricsReportItem(
             percentile=percentile,
-            sampleCount=len(samples),
-            totalSampleCount=len(self.samples),
-            minimum=samples[0],
-            average=statistics.mean(samples),
-            maximum=samples[-1],
-            deviation=statistics.stdev(samples) if len(samples) > 1 else math.inf,
+            valueCount=len(values),
+            totalValueCount=len(self.values),
+            minimum=values[0],
+            average=statistics.mean(values),
+            maximum=values[-1],
+            deviation=statistics.stdev(values) if len(values) > 1 else math.nan,
         )
 
     def reports(self, percentiles):
-        self.samples.sort()
+        self.values.sort()
         return [self.report(percentile) for percentile in percentiles]
 
 
