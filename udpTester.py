@@ -28,26 +28,24 @@ UDPTESTER_MIN_PKTSIZE = UDPTESTER_MIN_MSGSIZE
 
 def ipaddressSanitycheck(address):
     addressSplit = address.split(".")
-    numbers = [int(element) for element in addressSplit]
-
-    if len(addressSplit) != 4:
-        raise ValueError("ip address must consist of four numbers separated by a dot.")
-
-    for number in addressSplit:
-        if int(number) < 0 or 255 < int(number):
-            raise ValueError(
-                "Not all numbers in ip address are in the range from 0 to 255."
-            )
-
+    numbers = [int(element) for element in addressSplit if element.isdigit()]
+    if( len(numbers) != 4 ):
+        # ip address must consist of four numbers separated by a dot.
+        return False
+    for number in numbers:
+        if( number < 0 or 255 < number ):
+            # Numbers in ip address must be in the range from 0 to 255.
+            return False
+    return True # OK
 
 def ipaddressMulticastcheck(address):
     addressSplit = address.split(".")
-    numbers = [int(element) for element in addressSplit]
-
-    if numbers[0] < 224 or 239 < numbers[0]:
-        raise ValueError(
-            "ip address is not in the range from 224.0.0.0 to 239.255.255.255"
-        )
+    numbers = [int(element) for element in addressSplit if element.isdigit()]
+    if( numbers[0] < 224 or 239 < numbers[0] ):
+        # ip address must be in the range from 224.0.0.0 to 239.255.255.255
+        return False
+    else:
+        return True # OK
 
 
 def UDPTESTER_CEILTO_MIN_PKTSIZE(size):
@@ -56,6 +54,22 @@ def UDPTESTER_CEILTO_MIN_PKTSIZE(size):
     else:
         return size
 
+class progressBar:
+    def __init__(self, maxCount):
+        self.bars = 0
+        self.maxBars = 10
+        self.maxCount = maxCount
+
+    def show(self, count):
+        progress = count / self.maxCount
+        bars = int( progress * self.maxBars )
+        if( bars == self.bars ):
+            return # I don't need to print if bar count did not change.
+        self.bars = bars
+        if( progress == 1 ):
+            print("  Progress |"+"#"*self.bars+" "*(self.maxBars-self.bars)+"|")
+        else:
+            print("  Progress |"+"#"*self.bars+" "*(self.maxBars-self.bars)+"|", end="\r", flush=True)
 
 class socketWaitset:
     def __init__(self, sock):
@@ -74,8 +88,8 @@ class socketWaitset:
         max_attempts = math.ceil(timeout / miniTimeout)
         for attempt in range(0, max_attempts):
             if self.sel.select(miniTimeout):
-                return True
-        raise TimeoutError("socketWaitset.wait() timed out")
+                return True # Data available
+        return False # Timeout
 
 
 @dataclasses.dataclass
@@ -105,10 +119,10 @@ class udpMetrics:
             self.values.append(value)
 
     def report(self, percentile):
-        # ensure at least one value
         count = int(len(self.values) * percentile / 100.0)
 
         if count < 1:
+            # It doesn't make sense to try to do any calculations if I don't have a value.
             return udpMetricsReportItem()
 
         values = self.values[:count]
@@ -128,7 +142,7 @@ class udpMetrics:
         return [self.report(percentile) for percentile in percentiles]
 
 
-def transmitter(args):
+def transmitter(args, parser):
     print("I am the transmitter")
     DEFAULT_MSGSIZE = 100
     DEFAULT_SLEEPTIME = 20
@@ -148,6 +162,12 @@ def transmitter(args):
     lossiness = DEFAULT_LOSSINESS
     multiTTL = DEFAULT_MULTI_TTL
 
+    if ( args.outgoing == None ) or ( not ipaddressSanitycheck(args.outgoing) ):
+        parser.print_help()
+        sys.exit()
+    else:
+        interface = args.outgoing
+
     if args.port != None:
         portNr = args.port
     if args.messagesize != None:
@@ -158,10 +178,7 @@ def transmitter(args):
         packetSize = args.packetsize
     if args.interval != None:
         sleepTime = args.interval
-    if args.outgoing != None:
-        ipaddressSanitycheck(args.outgoing)
-        interface = args.outgoing
-    if args.lossiness != None:
+    if( args.lossiness != None ):
         lossiness = args.lossiness
 
     print(
@@ -186,8 +203,8 @@ def transmitter(args):
     )
     multicast_group = (address, portNr)
 
+    progress = progressBar(totNofMsgs)
     print(f"  Sending {totNofMsgs} messages now...")
-
     for i in range(0, totNofMsgs):
         msgIndex = i
         packetIndex = 0
@@ -211,11 +228,12 @@ def transmitter(args):
                 sock.sendto(buffer, multicast_group)
             remainingSize -= bufSize
             packetIndex += 1
+        progress.show(i + 1)
         time.sleep(sleepTime * 1e-3)
     sock.close()
 
 
-def receiver(args):
+def receiver(args, parser):
     print("I am the receiver")
     DEFAULT_PORTNR = 10350
     DEFAULT_MESSAGESIZE = 100
@@ -287,23 +305,31 @@ def receiver(args):
     totalMsgs = 0
     subTotalMsgs = 0
     msgIncomplete = 0
+    tallysheet = [ [ 0 ] * packetsPerMessage for j in range(0, expectedCount)]
+    duplicatePackets = 0
     receiveTimeOut = RECEIVE_TIMEOUT_SEC_INITIAL
 
     print(f"  Waiting for {expectedCount} messages now...")
     while expectedMsgIndex < expectedCount:
         # The buffer contains transmitter's data in C struct format, and is received using the socket.
-        waitset.wait(receiveTimeOut)
+        if( not waitset.wait(receiveTimeOut) ):
+            print(f"WARNING: Timed out after {receiveTimeOut} seconds whilst waiting for packets.")
+            break
         bytedata, sourceAddress = sock.recvfrom(packetSize)
         (msgIndex, packetIndex, timestamp) = struct.unpack(
             UDPTESTER_HDRFORMAT, bytedata[:UDPTESTER_HDRSIZE]
         )
 
         # Check and count received packets.
+        if ( 0 <= msgIndex and msgIndex < expectedCount ) and ( 0 <= packetIndex and packetIndex < packetsPerMessage):
+            tallysheet[ msgIndex ][ packetIndex ] += 1
+        if tallysheet[ msgIndex ][ packetIndex ] > 1:
+            duplicatePackets += 1
         if (msgIndex != expectedMsgIndex) or (packetIndex != expectedPacketIndex):
             if not quiet:
                 print(
                     f"Expected msgIndex {expectedMsgIndex} and packetIndex {expectedPacketIndex}, "
-                    f"received msgIndex {msgIndex} and packetIndex {packetIndex}"
+                    f"received msgIndex {msgIndex} and packetIndex {packetIndex} with count {tallysheet[ msgIndex ][ packetIndex ]}"
                 )
             expectedMsgIndex = msgIndex
             msgIncomplete = packetIndex != 0
@@ -358,47 +384,47 @@ def receiver(args):
     print(
         f"Received {totalMsgs} complete messages out of {expectedCount}, lost {lost:.1f}%"
     )
+    print(f"Received {duplicatePackets} duplicate packets")
 
 
 def create_parser():
     # shared args
     usageString = """
-    Running the transmitter:
-        udpTester.py transmitter address outgoing [-h] [-p PORT] [-m MESSAGESIZE] [-t TOTALCOUNT] [-s PACKETSIZE] [-i INTERVAL] [-l LOSSINESS]
+    udpTester.py -transmitter -a ADDRESS -o OUTGOING [-h] [-p PORT] [-t TOTALCOUNT] [-m MESSAGESIZE] [-s PACKETSIZE] [-i INTERVAL] [-l LOSSINESS]
 
-    Running the receiver:
-        udpTester.py receiver address [-h] [-p PORT] [-m MESSAGESIZE] [-t TOTALCOUNT] [-s PACKETSIZE] [-r REPORTINTERVAL] [-b RECEIVEBUFFER] [-q QUIET]
+    udpTester.py -receiver -a ADDRESS [-h] [-p PORT] [-t TOTALCOUNT] [-m MESSAGESIZE] [-s PACKETSIZE] [-b RECEIVEBUFFER] [-r REPORTINTERVAL] [-q QUIET]
 
-    Note that outgoing is a mandatory argument for the transmitter. It is the network interface address used for outgoing packets.
+    Example:
+        python3 udpTester.py -transmitter -a 239.0.0.1 -o 192.168.2.8 -t 200 -m 450 -s 150
+        python3 udpTester.py -receiver -a 239.0.0.1 -t 200 -m 450 -s 150 -b 200000
     """
     parser = argparse.ArgumentParser(
         usage=usageString, description="Test multicast traffic"
     )
     parser.add_argument(
-        "role", help="The role selected", type=str, choices=["transmitter", "receiver"]
-    )
-    parser.add_argument(
-        "address",
-        help="The ip address to use. Multicast addresses range from 224.0.0.0 to 239.255.255.255",
+        "-a",
+        "--address",
+        help="Mandatory argument: The ip address to use. Multicast addresses range from 224.0.0.0 to 239.255.255.255",
         type=str,
     )
     parser.add_argument("-p", "--port", help="The port number to use.", type=int)
+    parser.add_argument("-t", "--totalcount", help="Number of messages", type=int)
     parser.add_argument(
         "-m",
         "--messagesize",
         help="Bytes per message. A message may consist of multiple packets.",
         type=int,
     )
-    parser.add_argument("-t", "--totalcount", help="Number of messages", type=int)
     parser.add_argument("-s", "--packetsize", help="Bytes per packet sent", type=int)
 
     # transmitter specific args
-    if "transmitter" in sys.argv:
-        parser.add_argument(
-            "outgoing",
-            help="transmitter mandatory argument: This is the network interface address to use",
-            type=str,
-        )
+    parser.add_argument("-transmitter", help="Select the transmitter role", action='store_true')
+    parser.add_argument(
+        "-o",
+        "--outgoing",
+        help="transmitter mandatory argument: This is the network interface address to use",
+        type=str,
+    )
     parser.add_argument(
         "-i",
         "--interval",
@@ -413,16 +439,17 @@ def create_parser():
     )
 
     # receiver specific args
-    parser.add_argument(
-        "-r",
-        "--reportinterval",
-        help="receiver option: Number of messages per report.",
-        type=int,
-    )
+    parser.add_argument("-receiver", help="Select the receiver role", action='store_true')
     parser.add_argument(
         "-b",
         "--receivebuffer",
         help="receiver option: receivebuffer size in bytes.",
+        type=int,
+    )
+    parser.add_argument(
+        "-r",
+        "--reportinterval",
+        help="receiver option: Number of messages per report.",
         type=int,
     )
     parser.add_argument(
@@ -436,7 +463,7 @@ def activate_signal_handler():
     # signalhandler
     def signalHandler(signum, frame):
         print(" Ctrl c was pressed. Exiting...")
-        exit(1)
+        sys.exit()
 
     signal.signal(signal.SIGINT, signalHandler)
 
@@ -449,12 +476,17 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if not args:
         parser.print_help()
-        sys.exit(1)
+        sys.exit()
 
-    ipaddressSanitycheck(args.address)
-    ipaddressMulticastcheck(args.address)
-
-    if args.role == "transmitter":
-        transmitter(args)
-    elif args.role == "receiver":
-        receiver(args)
+    if( ( args.address == None ) or not ( ipaddressSanitycheck(args.address) and ipaddressMulticastcheck(args.address) ) ):
+        # It is mandatory to provide a valid ip address.
+        parser.print_help()
+        sys.exit()
+    if( args.transmitter == args.receiver ):
+        # You must choose either the transmitter or the receiver.
+        parser.print_help()
+        sys.exit()
+    if( args.transmitter ):
+        transmitter(args, parser)
+    elif( args.receiver ):
+        receiver(args, parser)
