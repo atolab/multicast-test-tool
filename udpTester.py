@@ -1,6 +1,6 @@
 import argparse
 import ctypes
-import dataclasses
+import ipaddress
 import math
 import random
 import signal
@@ -26,22 +26,17 @@ UDPTESTER_MIN_MSGSIZE = UDPTESTER_HDRSIZE
 UDPTESTER_MIN_PKTSIZE = UDPTESTER_MIN_MSGSIZE
 
 
-def ipaddressSanitycheck(address):
-    addressSplit = address.split(".")
-    numbers = [int(element) for element in addressSplit if element.isdigit()]
-    if( len(numbers) != 4 ):
-        # ip address must consist of four numbers separated by a dot.
+def ipAddressSanityCheck(address):
+    try:
+        ipaddress.ip_address(address)
+    except ValueError:
         return False
-    for number in numbers:
-        if( number < 0 or 255 < number ):
-            # Numbers in ip address must be in the range from 0 to 255.
-            return False
-    return True # OK
+    return True
 
-def ipaddressMulticastcheck(address):
+def ipAddressMulticastCheck(address):
     addressSplit = address.split(".")
     numbers = [int(element) for element in addressSplit if element.isdigit()]
-    if( numbers[0] < 224 or 239 < numbers[0] ):
+    if numbers[0] < 224 or 239 < numbers[0]:
         # ip address must be in the range from 224.0.0.0 to 239.255.255.255
         return False
     else:
@@ -54,22 +49,18 @@ def UDPTESTER_CEILTO_MIN_PKTSIZE(size):
     else:
         return size
 
-class progressBar:
-    def __init__(self, maxCount):
-        self.bars = 0
-        self.maxBars = 10
-        self.maxCount = maxCount
-
-    def show(self, count):
-        progress = count / self.maxCount
-        bars = int( progress * self.maxBars )
-        if( bars == self.bars ):
-            return # I don't need to print if bar count did not change.
-        self.bars = bars
-        if( progress == 1 ):
-            print("  Progress |"+"#"*self.bars+" "*(self.maxBars-self.bars)+"|")
-        else:
-            print("  Progress |"+"#"*self.bars+" "*(self.maxBars-self.bars)+"|", end="\r", flush=True)
+def progressBar(it, prefix="", size=60, file=sys.stdout):
+    count = len(it)
+    def show(j):
+        x = int(size*j/count)
+        file.write("%s[%s%s] %i/%i\r" % (prefix, "#"*x, "."*(size-x), j, count))
+        file.flush()
+    show(0)
+    for i, item in enumerate(it):
+        yield item
+        show(i+1)
+    file.write("\n")
+    file.flush()
 
 class socketWaitset:
     def __init__(self, sock):
@@ -92,15 +83,15 @@ class socketWaitset:
         return False # Timeout
 
 
-@dataclasses.dataclass
 class udpMetricsReportItem:
-    percentile: float = 0.0
-    valueCount: int = 0
-    totalValueCount: int = 0
-    minimum: float = 0
-    average: float = 0
-    maximum: float = 0
-    deviation: float = 0
+    def __init__(self, percentile=None, valueCount=None, totalValueCount=None, minimum=None, average=None, maximum=None, deviation=None):
+        self.percentile: float = percentile or 0.0
+        self.valueCount: int = valueCount or 0
+        self.totalValueCount: int = totalValueCount or 0
+        self.minimum: float = minimum or 0
+        self.average: float = average or 0
+        self.maximum: float = maximum or 0
+        self.deviation: float = deviation or 0
 
     def __str__(self):
         return (
@@ -109,20 +100,20 @@ class udpMetricsReportItem:
         )
 
 
-@dataclasses.dataclass
 class udpMetrics:
-    max_number_of_values: int
-    values: list = dataclasses.field(default_factory=list)
+    def __init__(self, max_number_of_values, values=None):
+        self.max_number_of_values: int = max_number_of_values
+        self.values: list = values or []
 
     def append(self, value):
         if len(self.values) < self.max_number_of_values:
             self.values.append(value)
 
     def report(self, percentile):
+        # ensure at least one value
         count = int(len(self.values) * percentile / 100.0)
 
         if count < 1:
-            # It doesn't make sense to try to do any calculations if I don't have a value.
             return udpMetricsReportItem()
 
         values = self.values[:count]
@@ -162,9 +153,9 @@ def transmitter(args, parser):
     lossiness = DEFAULT_LOSSINESS
     multiTTL = DEFAULT_MULTI_TTL
 
-    if ( args.outgoing == None ) or ( not ipaddressSanitycheck(args.outgoing) ):
+    if ( args.outgoing == None ) or ( not ipAddressSanityCheck(args.outgoing) ):
         parser.print_help()
-        sys.exit()
+        sys.exit(1)
     else:
         interface = args.outgoing
 
@@ -178,7 +169,7 @@ def transmitter(args, parser):
         packetSize = args.packetsize
     if args.interval != None:
         sleepTime = args.interval
-    if( args.lossiness != None ):
+    if args.lossiness != None:
         lossiness = args.lossiness
 
     print(
@@ -205,7 +196,7 @@ def transmitter(args, parser):
 
     progress = progressBar(totNofMsgs)
     print(f"  Sending {totNofMsgs} messages now...")
-    for i in range(0, totNofMsgs):
+    for i in progressBar(range(0, totNofMsgs), "  Progress: ", 20):
         msgIndex = i
         packetIndex = 0
         timestamp = time.time()
@@ -228,7 +219,6 @@ def transmitter(args, parser):
                 sock.sendto(buffer, multicast_group)
             remainingSize -= bufSize
             packetIndex += 1
-        progress.show(i + 1)
         time.sleep(sleepTime * 1e-3)
     sock.close()
 
@@ -312,7 +302,7 @@ def receiver(args, parser):
     print(f"  Waiting for {expectedCount} messages now...")
     while expectedMsgIndex < expectedCount:
         # The buffer contains transmitter's data in C struct format, and is received using the socket.
-        if( not waitset.wait(receiveTimeOut) ):
+        if not waitset.wait(receiveTimeOut):
             print(f"WARNING: Timed out after {receiveTimeOut} seconds whilst waiting for packets.")
             break
         bytedata, sourceAddress = sock.recvfrom(packetSize)
@@ -460,10 +450,9 @@ def create_parser():
 
 
 def activate_signal_handler():
-    # signalhandler
     def signalHandler(signum, frame):
         print(" Ctrl c was pressed. Exiting...")
-        sys.exit()
+        sys.exit(0)
 
     signal.signal(signal.SIGINT, signalHandler)
 
@@ -476,17 +465,17 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if not args:
         parser.print_help()
-        sys.exit()
+        sys.exit(1)
 
-    if( ( args.address == None ) or not ( ipaddressSanitycheck(args.address) and ipaddressMulticastcheck(args.address) ) ):
+    if not ipAddressSanityCheck(args.address) or not ipAddressMulticastCheck(args.address):
         # It is mandatory to provide a valid ip address.
         parser.print_help()
-        sys.exit()
-    if( args.transmitter == args.receiver ):
+        sys.exit(1)
+    if args.transmitter == args.receiver:
         # You must choose either the transmitter or the receiver.
         parser.print_help()
-        sys.exit()
-    if( args.transmitter ):
+        sys.exit(1)
+    if args.transmitter:
         transmitter(args, parser)
-    elif( args.receiver ):
+    elif args.receiver:
         receiver(args, parser)
