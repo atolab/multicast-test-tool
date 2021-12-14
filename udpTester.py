@@ -136,7 +136,7 @@ class udpMetricsReportItem:
     def __str__(self):
         return (
             f"{self.percentile:5.1f} % : cnt= {self.valueCount}/{self.totalValueCount},"
-            f" latency [µs]: min= {self.minimum:.0f},"
+            f" latency [usec]: min= {self.minimum:.0f},"
             f" avg= {self.average:.0f}, max= {self.maximum:.0f}, deviation= {self.deviation:.2f}"
         )
 
@@ -552,7 +552,7 @@ Example:
     """
     description_string = """
 Receive multicast messages. If I receive all messages from the transmitter, the network has passed the test.
-The results will also show latency values in µs, calculated as current_time - source_timestamp. These values
+The results will also show latency values in microseconds, calculated as current_time - source_timestamp. These values
 are not reliable when transmitter's and receiver's clocks are not precisely synchronized, and may be negative when the 
 receiver's clock is trailing the transmitter's clock.
     """
