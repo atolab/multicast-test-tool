@@ -45,6 +45,31 @@ def ipAddressMulticastCheck(address):
         return True  # OK
 
 
+def multicastAddressCheck(address):
+    if address == None:
+        print("\nERROR: Missing multicast address.\n")
+        return False
+    elif not ipAddressSanityCheck(address):
+        print("\nERROR: Provided multicast address is not a valid address.\n")
+        return False
+    elif not ipAddressMulticastCheck(address):
+        print("\nERROR: Provided multicast address does not support multicast.\n")
+        return False
+    else:
+        return True
+
+
+def networkInterfaceCheck(interface):
+    if interface == None:
+        print("\nERROR: Missing network interface address.\n")
+        return False
+    elif not ipAddressSanityCheck(interface):
+        print("\nERROR: Provided network interface is not a valid address.\n")
+        return False
+    else:
+        return True
+
+
 def UDPTESTER_CEILTO_MIN_PKTSIZE(size):
     if size < UDPTESTER_MIN_PKTSIZE:
         return UDPTESTER_MIN_PKTSIZE
@@ -110,8 +135,9 @@ class udpMetricsReportItem:
 
     def __str__(self):
         return (
-            f"{self.percentile:5.1f} % : cnt= {self.valueCount}/{self.totalValueCount}, min= {self.minimum:.0f},"
-            f" avg= {self.average:.0f}, max= {self.maximum:.0f}, dev= {self.deviation:.2f}"
+            f"{self.percentile:5.1f} % : cnt= {self.valueCount}/{self.totalValueCount},"
+            f" latency [usec]: min= {self.minimum:.0f},"
+            f" avg= {self.average:.0f}, max= {self.maximum:.0f}, deviation= {self.deviation:.2f}"
         )
 
 
@@ -151,7 +177,7 @@ class udpMetrics:
 def transmitter(parser):
     print("I am the transmitter")
     DEFAULT_MSGSIZE = 100
-    DEFAULT_SLEEPTIME = 20
+    DEFAULT_FREQUENCY = 50
     DEFAULT_TOTNOFMSGS = 1000
     DEFAULT_PORTNR = 10350
     DEFAULT_PACKETSIZE = 1300
@@ -160,7 +186,7 @@ def transmitter(parser):
 
     messageSize = DEFAULT_MSGSIZE
     totNofMsgs = DEFAULT_TOTNOFMSGS
-    sleepTime = DEFAULT_SLEEPTIME
+    frequency = DEFAULT_FREQUENCY
     portNr = DEFAULT_PORTNR
     packetSize = DEFAULT_PACKETSIZE
     lossiness = DEFAULT_LOSSINESS
@@ -169,18 +195,14 @@ def transmitter(parser):
     args, args_remaining = parser.parse_known_args()
 
     # Multicast address is required
-    if not ipAddressSanityCheck(args.address) or not ipAddressMulticastCheck(
-        args.address
-    ):
-        print("Warning: Missing multicast address.\n")
+    if not multicastAddressCheck(args.address):
         parser.print_help()
         sys.exit(1)
     else:
         address = args.address
 
     # Network interface address is required
-    if (args.interface == None) or (not ipAddressSanityCheck(args.interface)):
-        print("Warning: Missing network interface address.\n")
+    if not networkInterfaceCheck(args.interface):
         parser.print_help()
         sys.exit(1)
     else:
@@ -195,8 +217,8 @@ def transmitter(parser):
         totNofMsgs = args.totalcount
     if args.packetsize != None:
         packetSize = args.packetsize
-    if args.interval != None:
-        sleepTime = args.interval
+    if args.frequency != None and args.frequency > 0:
+        frequency = args.frequency
     if args.lossiness != None:
         lossiness = args.lossiness
 
@@ -208,7 +230,7 @@ def transmitter(parser):
     totalcount is set to    {totNofMsgs}
     messagesize is set to   {messageSize} bytes
     packetsize is set to    {packetSize} bytes
-    interval is set to      {sleepTime} milliseconds
+    frequency is set to     {frequency} Hz
     lossiness is set to     {lossiness}%"""
     )
 
@@ -217,11 +239,19 @@ def transmitter(parser):
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     ttl = struct.pack("<b", multiTTL)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
-    sock.setsockopt(
-        socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(interface)
-    )
+    try:
+        sock.setsockopt(
+            socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(interface)
+        )
+    except:
+        print(
+            f"\nERROR: Failed to set interface to {interface}. Did you provide the correct interface?\n"
+        )
+        parser.print_help()
+        sys.exit(1)
     multicast_group = (address, portNr)
 
+    sleepTime = 1.0 / frequency
     progress = progressBar(totNofMsgs)
     print(f"  Sending {totNofMsgs} messages now...")
     for i in progressBar(range(0, totNofMsgs), "  Progress: ", 20):
@@ -247,7 +277,7 @@ def transmitter(parser):
                 sock.sendto(buffer, multicast_group)
             remainingSize -= bufSize
             packetIndex += 1
-        time.sleep(sleepTime * 1e-3)
+        time.sleep(sleepTime)
     sock.close()
 
 
@@ -259,7 +289,6 @@ def receiver(parser):
     DEFAULT_REPORTINTERVAL = 100
     DEFAULT_PACKETSIZE = 1300
     DEFAULT_RCVBUFSIZE = 120000
-    DEFAULT_QUIET = 0
 
     RECEIVE_TIMEOUT_SEC = 10
     RECEIVE_TIMEOUT_SEC_INITIAL = 100
@@ -270,23 +299,18 @@ def receiver(parser):
     reportInterval = DEFAULT_REPORTINTERVAL
     packetSize = DEFAULT_PACKETSIZE
     rcvBufSize = DEFAULT_RCVBUFSIZE
-    quiet = DEFAULT_QUIET
 
     args, args_remaining = parser.parse_known_args()
 
     # Multicast address is required
-    if not ipAddressSanityCheck(args.address) or not ipAddressMulticastCheck(
-        args.address
-    ):
-        print("Warning: Missing multicast address.\n")
+    if not multicastAddressCheck(args.address):
         parser.print_help()
         sys.exit(1)
     else:
         joinAddressString = args.address
 
     # Network interface address is required
-    if (args.interface == None) or (not ipAddressSanityCheck(args.interface)):
-        print("Warning: Missing network interface address.\n")
+    if not networkInterfaceCheck(args.interface):
         parser.print_help()
         sys.exit(1)
     else:
@@ -304,8 +328,6 @@ def receiver(parser):
         reportInterval = args.reportinterval
     if args.receivebuffer != None:
         rcvBufSize = args.receivebuffer
-    if args.quiet != None:
-        quiet = args.quiet
 
     print(
         f"""
@@ -316,8 +338,7 @@ def receiver(parser):
     messagesize is set to    {messageSize} bytes
     packetsize is set to     {packetSize} bytes
     receivebuffer is set to  {rcvBufSize} bytes
-    reportInterval is set to {reportInterval}
-    quiet is set to          {quiet}"""
+    reportInterval is set to {reportInterval}"""
     )
 
     # Set the socket options for multicast receiver
@@ -328,7 +349,14 @@ def receiver(parser):
     multicast_group = socket.inet_aton(joinAddressString)
     networkInterface = socket.inet_aton(interface)
     mreq = struct.pack("4s4s", multicast_group, networkInterface)
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    try:
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    except:
+        print(
+            f"\nERROR: Failed to set interface to {interface}. Did you provide the correct interface?\n"
+        )
+        parser.print_help()
+        sys.exit(1)
     sock.setblocking(False)
     waitset = socketWaitset(sock)
 
@@ -370,11 +398,10 @@ def receiver(parser):
         if tallysheet[msgIndex][packetIndex] > 1:
             duplicatePackets += 1
         if (msgIndex != expectedMsgIndex) or (packetIndex != expectedPacketIndex):
-            if not quiet:
-                print(
-                    f"Expected msgIndex {expectedMsgIndex} and packetIndex {expectedPacketIndex}, "
-                    f"received msgIndex {msgIndex} and packetIndex {packetIndex} with count {tallysheet[ msgIndex ][ packetIndex ]}"
-                )
+            print(
+                f"Expected msgIndex {expectedMsgIndex} and packetIndex {expectedPacketIndex}, "
+                f"received msgIndex {msgIndex} and packetIndex {packetIndex} with count {tallysheet[ msgIndex ][ packetIndex ]}"
+            )
             expectedMsgIndex = msgIndex
             msgIncomplete = packetIndex != 0
         if packetIndex == (packetsPerMessage - 1):
@@ -396,7 +423,7 @@ def receiver(parser):
         # Report metrics
         if reportCount == 0:
             print(
-                f"received {totalPackets} packets, expecting {totalPacketsExpected} in total"
+                f"received {totalPackets} packets from {sourceAddress[0]}, expecting {totalPacketsExpected} in total"
             )
             reportCount = reportInterval * packetsPerMessage
 
@@ -471,7 +498,7 @@ def create_parser():
         type=str,
     )
     parser_common.add_argument(
-        "-f",
+        "-i",
         "--interface",
         help="Mandatory argument: This is the network interface address to use",
         type=str,
@@ -495,35 +522,43 @@ def create_parser():
     # transmitter specific args
     epilogStringTransmitter = """
 Example:
-    python3 udpTester.py transmitter -a 239.0.0.1 -f 192.168.2.33 -t 200 -m 450 -s 150 -i 15
+    python3 udpTester.py transmitter -a 239.0.0.1 -i 192.168.2.33 -t 200 -m 450 -s 150 -f 60
     """
     parser_transmitter = subparsers.add_parser(
         "transmitter",
+        description="Send messages via multicast. If the receiver receives all of them, the network has passed the test.",
         help="Select the transmitter role",
         parents=[parser_common],
         epilog=epilogStringTransmitter,
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser_transmitter.add_argument(
-        "-i",
-        "--interval",
-        help="transmitter option: Interval between messages in unit milliseconds.",
-        type=int,
+        "-f",
+        "--frequency",
+        help="transmitter option: Frequency of sending messages in unit Hz.",
+        type=float,
     )
     parser_transmitter.add_argument(
         "-l",
         "--lossiness",
-        help="transmitter option: Randomly skip sending a packet.",
+        help="transmitter option: Randomly skip sending a packet, chance in unit %%.",
         type=int,
     )
 
     # receiver specific args
     epilogStringReceiver = """
 Example:
-    python3 udpTester.py receiver -a 239.0.0.1 -f 192.168.2.33 -t 200 -m 450 -s 150 -b 200000
+    python3 udpTester.py receiver -a 239.0.0.1 -i 192.168.2.33 -t 200 -m 450 -s 150 -b 200000
+    """
+    description_string = """
+Receive multicast messages. If I receive all messages from the transmitter, the network has passed the test.
+The results will also show latency values in microseconds, calculated as current_time - source_timestamp. These values
+are not reliable when transmitter's and receiver's clocks are not precisely synchronized, and may be negative when the 
+receiver's clock is trailing the transmitter's clock.
     """
     parser_receiver = subparsers.add_parser(
         "receiver",
+        description=description_string,
         help="Select the receiver role",
         parents=[parser_common],
         epilog=epilogStringReceiver,
@@ -540,9 +575,6 @@ Example:
         "--reportinterval",
         help="receiver option: Number of messages per report.",
         type=int,
-    )
-    parser_receiver.add_argument(
-        "-q", "--quiet", help="receiver option: Suppress some prints.", type=int
     )
 
     return (parser, parser_receiver, parser_transmitter)
